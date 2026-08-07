@@ -54,6 +54,8 @@ static bool should_fake_time() {
         strstr(prog, "bluetooth") ||
         strstr(prog, "nfc") ||
         strstr(prog, "shell") ||
+        strstr(prog, "gms") ||      // <-- 구글 플레이 서비스 (Google Mobile Services)
+        strstr(prog, "naver") ||    // <-- 네이버 앱
         strcmp(prog, "zygote") == 0 ||
         strcmp(prog, "zygote64") == 0) {
         return false;
