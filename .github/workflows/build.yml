@@ -2,59 +2,160 @@ name: Build Zygisk Module
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Download Dobby Source & Patch Assembly
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Dobby
         run: |
           git clone --recursive https://github.com/jmpews/Dobby.git dobby
-          
-          # Dobby의 구형 ARM64 어셈블리 문법을 최신 NDK/Clang 호환 문법으로 자동 패치
-          python3 -c '
-          import re
-          path = "dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
-          with open(path, "r") as f:
-              content = f.read()
-          content = re.sub(r"adrp\s+(\w+),\s*(.+?)@PAGE", r"adrp \1, :pg_hi21:\2", content)
-          content = re.sub(r"add\s+(\w+),\s*(\w+),\s*(.+?)@PAGEOFF", r"add \1, \2, :lo12:\3", content)
-          with open(path, "w") as f:
-              f.write(content)
-          '
 
-      - name: Setup Android SDK & NDK
+      - name: Patch Dobby ARM64 Assembly
+        shell: bash
+        run: |
+          set -e
+
+          ASM="dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+
+          echo "=== Original ARM64 relocation lines ==="
+          grep -nE 'adrp|PAGE|PAGEOFF' "$ASM" || true
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "dobby/source/TrampolineBridge/"
+              "ClosureTrampolineBridge/arm64/"
+              "closure_bridge_arm64.asm"
+          )
+
+          text = path.read_text()
+
+          old1 = "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
+          old2 = "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF"
+
+          new1 = "adrp TMP_REG_0, :pg_hi21:cdecl(common_closure_bridge_handler)"
+          new2 = "add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)"
+
+          if old1 not in text:
+              raise SystemExit(
+                  "ERROR: expected ADRP line was not found. "
+                  "Dobby source may have changed."
+              )
+
+          if old2 not in text:
+              raise SystemExit(
+                  "ERROR: expected ADD line was not found. "
+                  "Dobby source may have changed."
+              )
+
+          text = text.replace(old1, new1)
+          text = text.replace(old2, new2)
+
+          path.write_text(text)
+
+          print("ARM64 assembly patched successfully.")
+          PY
+
+          echo "=== Patched ARM64 relocation lines ==="
+          grep -nE 'adrp|PAGE|PAGEOFF|pg_hi21|lo12' "$ASM" || true
+
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-ndk@v1
         with:
           ndk-version: 23.2.8568313
 
+      - name: Show Toolchain Versions
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
+          cmake --version
+
       - name: Build Arm64
         run: |
-          mkdir build_arm64 && cd build_arm64
-          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 ..
-          make
-          
+          set -e
+
+          rm -rf build_arm64
+          mkdir build_arm64
+          cd build_arm64
+
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DDOBBY_BUILD_SHARED=OFF \
+            -DDOBBY_BUILD_STATIC=ON \
+            ..
+
+          cmake --build . --parallel "$(nproc)"
+
       - name: Build Armv7
         run: |
-          mkdir build_armv7 && cd build_armv7
-          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 ..
-          make
+          set -e
+
+          rm -rf build_armv7
+          mkdir build_armv7
+          cd build_armv7
+
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=armeabi-v7a \
+            -DANDROID_PLATFORM=android-24 \
+            -DDOBBY_BUILD_SHARED=OFF \
+            -DDOBBY_BUILD_STATIC=ON \
+            ..
+
+          cmake --build . --parallel "$(nproc)"
+
+      - name: Locate Built Library
+        run: |
+          echo "=== Arm64 ==="
+          find build_arm64 -type f \
+            \( -name "libuptime_faker.so" -o -name "libdobby*.a" \) \
+            -print
+
+          echo "=== Armv7 ==="
+          find build_armv7 -type f \
+            \( -name "libuptime_faker.so" -o -name "libdobby*.a" \) \
+            -print
 
       - name: Package ZIP
         run: |
-          mkdir -p dist/zygisk
-          cp build_arm64/libuptime_faker.so dist/zygisk/arm64-v8a.so
-          cp build_armv7/libuptime_faker.so dist/zygisk/armeabi-v7a.so
-          cp module.prop dist/
-          cd dist && zip -r ../UptimeFaker.zip *
+          set -e
 
-      - uses: actions/upload-artifact@v4
+          mkdir -p dist/zygisk
+
+          test -f build_arm64/libuptime_faker.so
+          test -f build_armv7/libuptime_faker.so
+
+          cp build_arm64/libuptime_faker.so \
+             dist/zygisk/arm64-v8a.so
+
+          cp build_armv7/libuptime_faker.so \
+             dist/zygisk/armeabi-v7a.so
+
+          cp module.prop dist/
+
+          cd dist
+          zip -r ../UptimeFaker.zip .
+
+      - name: Verify ZIP
+        run: |
+          echo "=== ZIP contents ==="
+          unzip -l UptimeFaker.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: UptimeFaker
           path: UptimeFaker.zip
