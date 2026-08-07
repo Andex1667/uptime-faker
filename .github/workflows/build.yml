@@ -11,10 +11,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Dobby Source
-        run: git clone --recursive https://github.com/jmpews/Dobby.git dobby
+      - name: Download Dobby Source & Patch Assembly
+        run: |
+          git clone --recursive https://github.com/jmpews/Dobby.git dobby
+          
+          # Dobby의 구형 ARM64 어셈블리 문법을 최신 NDK/Clang 호환 문법으로 자동 패치
+          python3 -c '
+          import re
+          path = "dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+          with open(path, "r") as f:
+              content = f.read()
+          content = re.sub(r"adrp\s+(\w+),\s*(.+?)@PAGE", r"adrp \1, :pg_hi21:\2", content)
+          content = re.sub(r"add\s+(\w+),\s*(\w+),\s*(.+?)@PAGEOFF", r"add \1, \2, :lo12:\3", content)
+          with open(path, "w") as f:
+              f.write(content)
+          '
 
-      - name: Setup Android SDK & NDK (r23b)
+      - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
         with:
           ndk-version: 23.2.8568313
