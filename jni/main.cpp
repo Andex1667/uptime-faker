@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <random>
 #include <errno.h>
 #include <dobby.h>
 #include "zygisk.hpp"
@@ -39,8 +40,20 @@
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-static const unsigned long kUptimeOffsetSec = 600 * 3600;
 #define USER_HZ 100
+
+// 랜덤 오프셋 생성 함수 (시간(hour) 단위 입력받아 초(second)로 변환)
+static unsigned long get_random_offset(unsigned long min_h, unsigned long max_h) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_int_distribution<unsigned long> dis(min_h * 3600, max_h * 3600);
+    return dis(gen);
+}
+
+// 부팅 시간 오프셋: 600 ~ 800 시간 사이 랜덤
+// Monotonic 시간 오프셋: 300 ~ 400 시간 사이 랜덤
+static unsigned long kBootTimeOffsetSec = get_random_offset(600, 800);
+static unsigned long kMonotonicOffsetSec = get_random_offset(300, 400);
 
 static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
@@ -49,6 +62,8 @@ static int (*orig_openat)(int dirfd, const char *pathname, int flags, ...) = nul
 static int (*orig_openat64)(int dirfd, const char *pathname, int flags, ...) = nullptr;
 static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
 static int (*orig_open64)(const char *pathname, int flags, ...) = nullptr;
+
+static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
 
 static bool read_all_from_fd(int fd, std::string &out_data) {
     out_data.clear();
@@ -103,7 +118,9 @@ static int generate_fake_uptime_fd() {
 
     double real_boot = static_cast<double>(ts_boot_real.tv_sec) + (static_cast<double>(ts_boot_real.tv_nsec) / 1e9);
     double real_mono = static_cast<double>(ts_mono_real.tv_sec) + (static_cast<double>(ts_mono_real.tv_nsec) / 1e9);
-    double fake_boot = real_boot + kUptimeOffsetSec;
+    
+    // /proc/uptime 첫 번째 값은 boottime 기준 적용
+    double fake_boot = real_boot + kBootTimeOffsetSec;
 
     long num_cores = sysconf(_SC_NPROCESSORS_CONF);
     if (num_cores < 1) num_cores = 1;
@@ -135,7 +152,7 @@ static int generate_fake_stat_fd(int real_fd) {
         if (line.rfind("btime ", 0) == 0) {
             try {
                 unsigned long real_btime = std::stoul(line.substr(6));
-                unsigned long fake_btime = (real_btime > kUptimeOffsetSec) ? (real_btime - kUptimeOffsetSec) : real_btime;
+                unsigned long fake_btime = (real_btime > kBootTimeOffsetSec) ? (real_btime - kBootTimeOffsetSec) : real_btime;
                 fake_content += "btime " + std::to_string(fake_btime) + "\n";
             } catch (...) {
                 fake_content += line + "\n";
@@ -169,7 +186,7 @@ static int generate_fake_stat_self_fd(int real_fd) {
     if (tokens.size() > 19) {
         try {
             unsigned long long real_starttime = std::stoull(tokens[19]);
-            unsigned long long offset_jiffies = static_cast<unsigned long long>(kUptimeOffsetSec) * USER_HZ;
+            unsigned long long offset_jiffies = static_cast<unsigned long long>(kBootTimeOffsetSec) * USER_HZ;
             tokens[19] = std::to_string(real_starttime + offset_jiffies);
         } catch (...) {}
     }
@@ -298,9 +315,12 @@ int my_open64(const char *pathname, int flags, ...) {
 #endif
 }
 
+// 시간 종류에 따라 다른 오프셋 적용 (BOOTTIME vs MONOTONIC)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
-    if (clk_id == CLOCK_BOOTTIME || clk_id == CLOCK_MONOTONIC) {
-        tp->tv_sec += kUptimeOffsetSec;
+    if (clk_id == CLOCK_BOOTTIME) {
+        tp->tv_sec += kBootTimeOffsetSec;
+    } else if (clk_id == CLOCK_MONOTONIC) {
+        tp->tv_sec += kMonotonicOffsetSec;
     }
 }
 
@@ -315,6 +335,20 @@ int my___clock_gettime(clockid_t clk_id, struct timespec *tp) {
               (orig_clock_gettime ? orig_clock_gettime(clk_id, tp) : static_cast<int>(syscall(__NR_clock_gettime, clk_id, tp)));
     if (ret == 0 && tp) apply_time_offset(clk_id, tp);
     return ret;
+}
+
+// 부트 카운트 속성 조작 (13회 고정)
+int my___system_property_get(const char *key, char *value) {
+    if (key && strcmp(key, "sys.boot_count") == 0) {
+        if (value) {
+            snprintf(value, 92, "13");
+        }
+        return 2;
+    }
+    if (orig___system_property_get) {
+        return orig___system_property_get(key, value);
+    }
+    return -1;
 }
 
 static bool safe_hook(const char *symbol, void *new_func, void **orig_func, bool required) {
@@ -357,6 +391,7 @@ private:
         safe_hook("openat64", reinterpret_cast<void *>(my_openat64), reinterpret_cast<void **>(&orig_openat64), false);
         safe_hook("open", reinterpret_cast<void *>(my_open), reinterpret_cast<void **>(&orig_open), false);
         safe_hook("open64", reinterpret_cast<void *>(my_open64), reinterpret_cast<void **>(&orig_open64), false);
+        safe_hook("__system_property_get", reinterpret_cast<void *>(my___system_property_get), reinterpret_cast<void **>(&orig___system_property_get), false);
     }
 };
 
