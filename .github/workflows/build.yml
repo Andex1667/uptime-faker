@@ -46,14 +46,12 @@ jobs:
 
           if old1 not in text:
               raise SystemExit(
-                  "ERROR: expected ADRP line was not found. "
-                  "Dobby source may have changed."
+                  "ERROR: expected ADRP line was not found."
               )
 
           if old2 not in text:
               raise SystemExit(
-                  "ERROR: expected ADD line was not found. "
-                  "Dobby source may have changed."
+                  "ERROR: expected ADD line was not found."
               )
 
           text = text.replace(old1, new1)
@@ -70,16 +68,27 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Android NDK
-        uses: android-actions/setup-ndk@v1
-        with:
-          ndk-version: 23.2.8568313
-
-      - name: Show Toolchain Versions
+      - name: Install Android NDK
         run: |
+          set -e
+
+          sdkmanager "ndk;23.2.8568313"
+
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
+
+      - name: Verify Android NDK
+        run: |
+          set -e
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK=$ANDROID_NDK"
+
+          test -d "$ANDROID_NDK_HOME"
+          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
-          cmake --version
 
       - name: Build Arm64
         run: |
