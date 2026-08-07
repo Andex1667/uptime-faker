@@ -19,11 +19,6 @@ jobs:
         with:
           ndk-version: 23.2.8568313
 
-      - name: Force NDK 23 (Remove conflicting NDK 27)
-        run: |
-          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.*
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
-
       - name: Build Arm64
         run: |
           mkdir build_arm64 && cd build_arm64
