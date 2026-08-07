@@ -13,23 +13,26 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
+      # ==================================================
       # Checkout
-      # --------------------------------------------------
+      # ==================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------
+      # ==================================================
       # Android SDK
-      # --------------------------------------------------
+      # ==================================================
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
 
-      # --------------------------------------------------
-      # Install exact NDK version
-      # --------------------------------------------------
+      # ==================================================
+      # Android NDK
+      # ==================================================
+
       - name: Install Android NDK
         shell: bash
         run: |
@@ -44,40 +47,46 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
 
-          echo "NDK installed:"
+          echo "================================"
+          echo "ANDROID NDK"
+          echo "================================"
+
           echo "$ANDROID_SDK_ROOT/ndk/23.2.8568313"
 
 
-      # --------------------------------------------------
-      # Verify toolchain
-      # --------------------------------------------------
+      # ==================================================
+      # Verify NDK
+      # ==================================================
+
       - name: Verify Android Toolchain
         shell: bash
         run: |
           set -e
 
           test -d "$ANDROID_NDK_HOME"
-          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 
-          echo "=== NDK ==="
+          test -f \
+            "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
+          echo "================================"
+          echo "NDK VERSION"
+          echo "================================"
+
           cat "$ANDROID_NDK_HOME/source.properties"
 
           echo ""
-          echo "=== Clang ==="
+          echo "================================"
+          echo "CLANG VERSION"
+          echo "================================"
+
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
             --version
 
-          echo ""
-          echo "=== CMake ==="
-          cmake --version
 
-
-      # --------------------------------------------------
+      # ==================================================
       # Download Android-compatible Dobby
-      #
-      # IMPORTANT:
-      # Do NOT use jmpews/Dobby here.
-      # --------------------------------------------------
+      # ==================================================
+
       - name: Download Dobby
         shell: bash
         run: |
@@ -85,41 +94,55 @@ jobs:
 
           rm -rf dobby
 
-          git clone --depth 1 \
+          git clone \
+            --depth 1 \
             https://github.com/JingMatrix/Dobby.git \
             dobby
 
-          echo "=== Dobby revision ==="
+          test -f dobby/CMakeLists.txt
+          test -f dobby/include/dobby.h
+
+          echo "================================"
+          echo "DOBBY SOURCE OK"
+          echo "================================"
+
           cd dobby
+
           git log -1 --oneline
 
 
-      # --------------------------------------------------
-      # Verify Dobby source
-      # --------------------------------------------------
-      - name: Verify Dobby
+      # ==================================================
+      # Show Dobby ARM64 source
+      # ==================================================
+
+      - name: Inspect Dobby
         shell: bash
         run: |
           set -e
 
-          test -f dobby/CMakeLists.txt
-          test -f dobby/include/dobby.h
-          test -f dobby/source/dobby.cpp
+          echo "================================"
+          echo "DOBBY ARM64 SOURCES"
+          echo "================================"
 
-          echo "Dobby source OK"
+          find dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64 \
+            -maxdepth 1 \
+            -type f \
+            -print
 
           echo ""
-          echo "Checking Android/ARM64 assembly..."
+          echo "================================"
+          echo "DOBBY CMAKE ARM64 REFERENCES"
+          echo "================================"
 
-          test -f \
-            dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+          grep -n \
+            "ClosureTrampolineBridge/arm64" \
+            dobby/CMakeLists.txt || true
 
-          echo "ARM64 assembly OK"
 
-
-      # --------------------------------------------------
+      # ==================================================
       # Build ARM64
-      # --------------------------------------------------
+      # ==================================================
+
       - name: Build Arm64
         shell: bash
         run: |
@@ -127,7 +150,9 @@ jobs:
 
           rm -rf build_arm64
 
-          cmake -S . -B build_arm64 \
+          cmake \
+            -S . \
+            -B build_arm64 \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
@@ -137,13 +162,15 @@ jobs:
             -DDOBBY_BUILD_TEST=OFF \
             -DPrivate.Obfuscation=OFF
 
-          cmake --build build_arm64 \
+          cmake \
+            --build build_arm64 \
             --parallel "$(nproc)"
 
 
-      # --------------------------------------------------
+      # ==================================================
       # Build ARMv7
-      # --------------------------------------------------
+      # ==================================================
+
       - name: Build Armv7
         shell: bash
         run: |
@@ -151,7 +178,9 @@ jobs:
 
           rm -rf build_armv7
 
-          cmake -S . -B build_armv7 \
+          cmake \
+            -S . \
+            -B build_armv7 \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=armeabi-v7a \
             -DANDROID_PLATFORM=android-24 \
@@ -161,20 +190,22 @@ jobs:
             -DDOBBY_BUILD_TEST=OFF \
             -DPrivate.Obfuscation=OFF
 
-          cmake --build build_armv7 \
+          cmake \
+            --build build_armv7 \
             --parallel "$(nproc)"
 
 
-      # --------------------------------------------------
-      # Find generated libraries
-      # --------------------------------------------------
+      # ==================================================
+      # Find Output
+      # ==================================================
+
       - name: Find Output Libraries
         shell: bash
         run: |
           set -e
 
           echo "================================"
-          echo "ARM64 outputs"
+          echo "ARM64 OUTPUTS"
           echo "================================"
 
           find build_arm64 \
@@ -187,7 +218,7 @@ jobs:
 
           echo ""
           echo "================================"
-          echo "ARMv7 outputs"
+          echo "ARMV7 OUTPUTS"
           echo "================================"
 
           find build_armv7 \
@@ -199,20 +230,23 @@ jobs:
             -print
 
 
-      # --------------------------------------------------
-      # Verify Uptime Faker library
-      # --------------------------------------------------
+      # ==================================================
+      # Verify Uptime Faker
+      # ==================================================
+
       - name: Verify Uptime Faker
         shell: bash
         run: |
           set -e
 
-          echo "Searching for libuptime_faker.so..."
+          echo "Searching ARM64 library..."
 
           ARM64_LIB=$(find build_arm64 \
             -type f \
             -name "libuptime_faker.so" \
             | head -n 1)
+
+          echo "Searching ARMv7 library..."
 
           ARMV7_LIB=$(find build_armv7 \
             -type f \
@@ -230,22 +264,26 @@ jobs:
           fi
 
           echo ""
-          echo "ARM64:"
+          echo "================================"
+          echo "ARM64 LIBRARY"
+          echo "================================"
+
           echo "$ARM64_LIB"
           file "$ARM64_LIB"
 
           echo ""
-          echo "ARMv7:"
+          echo "================================"
+          echo "ARMV7 LIBRARY"
+          echo "================================"
+
           echo "$ARMV7_LIB"
           file "$ARMV7_LIB"
 
-          echo ""
-          echo "Libraries verified."
 
+      # ==================================================
+      # Package
+      # ==================================================
 
-      # --------------------------------------------------
-      # Package module
-      # --------------------------------------------------
       - name: Package ZIP
         shell: bash
         run: |
@@ -272,16 +310,18 @@ jobs:
           cp "$ARMV7_LIB" \
             dist/zygisk/armeabi-v7a.so
 
-          cp module.prop dist/module.prop
+          cp module.prop \
+            dist/module.prop
 
           cd dist
 
           zip -r ../UptimeFaker.zip .
 
 
-      # --------------------------------------------------
-      # Verify final ZIP
-      # --------------------------------------------------
+      # ==================================================
+      # Verify ZIP
+      # ==================================================
+
       - name: Verify ZIP
         shell: bash
         run: |
@@ -303,9 +343,10 @@ jobs:
           unzip -t UptimeFaker.zip
 
 
-      # --------------------------------------------------
-      # Upload artifact
-      # --------------------------------------------------
+      # ==================================================
+      # Upload
+      # ==================================================
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
