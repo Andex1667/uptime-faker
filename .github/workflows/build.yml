@@ -423,6 +423,10 @@ jobs:
             module.prop \
             dist/module.prop
 
+          cp \
+            customize.sh \
+            dist/customize.sh
+
           cd dist
 
           zip -r ../UptimeFaker.zip .
