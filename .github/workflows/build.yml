@@ -30,7 +30,7 @@ jobs:
 
 
       # ==================================================
-      # Android NDK
+      # Install Android NDK
       # ==================================================
 
       - name: Install Android NDK
@@ -55,7 +55,7 @@ jobs:
 
 
       # ==================================================
-      # Verify NDK
+      # Verify Android Toolchain
       # ==================================================
 
       - name: Verify Android Toolchain
@@ -82,6 +82,13 @@ jobs:
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
             --version
 
+          echo ""
+          echo "================================"
+          echo "CMAKE VERSION"
+          echo "================================"
+
+          cmake --version
+
 
       # ==================================================
       # Download Android-compatible Dobby
@@ -107,12 +114,94 @@ jobs:
           echo "================================"
 
           cd dobby
-
           git log -1 --oneline
+          cd ..
 
 
       # ==================================================
-      # Show Dobby ARM64 source
+      # Patch Dobby LINE_MAX compatibility
+      # ==================================================
+
+      - name: Patch Dobby LINE_MAX
+        shell: bash
+        run: |
+          set -e
+
+          FILE="dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntimeUtility.cc"
+
+          echo "================================"
+          echo "CHECK Dobby FILE"
+          echo "================================"
+
+          test -f "$FILE"
+
+          echo "$FILE"
+
+          echo ""
+          echo "================================"
+          echo "APPLY LINE_MAX PATCH"
+          echo "================================"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "dobby/source/Backend/UserMode/"
+              "PlatformUtil/Linux/ProcessRuntimeUtility.cc"
+          )
+
+          text = path.read_text()
+
+          marker = "// Dobby Android LINE_MAX compatibility"
+
+          if marker in text:
+              print("LINE_MAX patch already exists.")
+          else:
+              lines = text.splitlines()
+
+              insert_at = 0
+
+              # Skip the initial #include block.
+              while insert_at < len(lines):
+                  line = lines[insert_at].strip()
+
+                  if line.startswith("#include"):
+                      insert_at += 1
+                  else:
+                      break
+
+              patch = [
+                  "",
+                  "// Dobby Android LINE_MAX compatibility",
+                  "#ifndef LINE_MAX",
+                  "#define LINE_MAX 4096",
+                  "#endif",
+                  ""
+              ]
+
+              lines[insert_at:insert_at] = patch
+
+              path.write_text(
+                  "\n".join(lines) + "\n"
+              )
+
+              print("LINE_MAX compatibility patch applied.")
+          PY
+
+          echo ""
+          echo "================================"
+          echo "VERIFY PATCH"
+          echo "================================"
+
+          grep -n \
+            -B2 \
+            -A4 \
+            "Dobby Android LINE_MAX compatibility" \
+            "$FILE"
+
+
+      # ==================================================
+      # Inspect Dobby
       # ==================================================
 
       - name: Inspect Dobby
@@ -124,18 +213,19 @@ jobs:
           echo "DOBBY ARM64 SOURCES"
           echo "================================"
 
-          find dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64 \
+          find \
+            dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64 \
             -maxdepth 1 \
             -type f \
             -print
 
           echo ""
           echo "================================"
-          echo "DOBBY CMAKE ARM64 REFERENCES"
+          echo "Dobby CMake"
           echo "================================"
 
           grep -n \
-            "ClosureTrampolineBridge/arm64" \
+            "ClosureTrampolineBridge" \
             dobby/CMakeLists.txt || true
 
 
@@ -150,6 +240,10 @@ jobs:
 
           rm -rf build_arm64
 
+          echo "================================"
+          echo "CONFIGURE ARM64"
+          echo "================================"
+
           cmake \
             -S . \
             -B build_arm64 \
@@ -161,6 +255,11 @@ jobs:
             -DDOBBY_BUILD_EXAMPLE=OFF \
             -DDOBBY_BUILD_TEST=OFF \
             -DPrivate.Obfuscation=OFF
+
+          echo ""
+          echo "================================"
+          echo "BUILD ARM64"
+          echo "================================"
 
           cmake \
             --build build_arm64 \
@@ -178,6 +277,10 @@ jobs:
 
           rm -rf build_armv7
 
+          echo "================================"
+          echo "CONFIGURE ARMV7"
+          echo "================================"
+
           cmake \
             -S . \
             -B build_armv7 \
@@ -190,13 +293,18 @@ jobs:
             -DDOBBY_BUILD_TEST=OFF \
             -DPrivate.Obfuscation=OFF
 
+          echo ""
+          echo "================================"
+          echo "BUILD ARMV7"
+          echo "================================"
+
           cmake \
             --build build_armv7 \
             --parallel "$(nproc)"
 
 
       # ==================================================
-      # Find Output
+      # Find Output Libraries
       # ==================================================
 
       - name: Find Output Libraries
@@ -239,49 +347,48 @@ jobs:
         run: |
           set -e
 
-          echo "Searching ARM64 library..."
-
           ARM64_LIB=$(find build_arm64 \
             -type f \
             -name "libuptime_faker.so" \
             | head -n 1)
-
-          echo "Searching ARMv7 library..."
 
           ARMV7_LIB=$(find build_armv7 \
             -type f \
             -name "libuptime_faker.so" \
             | head -n 1)
 
+          echo "================================"
+          echo "CHECK ARM64"
+          echo "================================"
+
           if [ -z "$ARM64_LIB" ]; then
             echo "ERROR: ARM64 libuptime_faker.so not found"
             exit 1
           fi
+
+          echo "ARM64:"
+          echo "$ARM64_LIB"
+
+          file "$ARM64_LIB"
+
+          echo ""
+          echo "================================"
+          echo "CHECK ARMV7"
+          echo "================================"
 
           if [ -z "$ARMV7_LIB" ]; then
             echo "ERROR: ARMv7 libuptime_faker.so not found"
             exit 1
           fi
 
-          echo ""
-          echo "================================"
-          echo "ARM64 LIBRARY"
-          echo "================================"
-
-          echo "$ARM64_LIB"
-          file "$ARM64_LIB"
-
-          echo ""
-          echo "================================"
-          echo "ARMV7 LIBRARY"
-          echo "================================"
-
+          echo "ARMv7:"
           echo "$ARMV7_LIB"
+
           file "$ARMV7_LIB"
 
 
       # ==================================================
-      # Package
+      # Package Zygisk Module
       # ==================================================
 
       - name: Package ZIP
@@ -304,13 +411,16 @@ jobs:
             -name "libuptime_faker.so" \
             | head -n 1)
 
-          cp "$ARM64_LIB" \
+          cp \
+            "$ARM64_LIB" \
             dist/zygisk/arm64-v8a.so
 
-          cp "$ARMV7_LIB" \
+          cp \
+            "$ARMV7_LIB" \
             dist/zygisk/armeabi-v7a.so
 
-          cp module.prop \
+          cp \
+            module.prop \
             dist/module.prop
 
           cd dist
@@ -344,7 +454,7 @@ jobs:
 
 
       # ==================================================
-      # Upload
+      # Upload Artifact
       # ==================================================
 
       - name: Upload Artifact
