@@ -14,7 +14,7 @@ jobs:
       - name: Download Dobby
         run: git clone --recursive https://github.com/jmpews/Dobby.git dobby
 
-      - name: Setup Android SDK & NDK
+      - name: Setup Android SDK & NDK (r23b)
         uses: android-actions/setup-android@v3
         with:
           ndk-version: 23.2.8568313
@@ -23,14 +23,14 @@ jobs:
         run: |
           mkdir build_arm64 && cd build_arm64
           cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DDOBBY_GENERATE_ARM64_CLOSURE=OFF ..
+                -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 ..
           make
           
       - name: Build Armv7
         run: |
           mkdir build_armv7 && cd build_armv7
           cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 -DDOBBY_GENERATE_ARM64_CLOSURE=OFF ..
+                -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 ..
           make
 
       - name: Package ZIP
