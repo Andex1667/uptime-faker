@@ -6,67 +6,63 @@ on:
   workflow_dispatch:
 
 jobs:
-     build:
-       runs-on: ubuntu-latest
-       steps:
-         - name: Checkout Code
-           uses: actions/checkout@v4
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-         - name: Download Dobby Source
-           run: |
-             git clone --recursive https://github.com/jmpews/Dobby.git dobby
+      - name: Download Dobby Source
+        run: |
+          git clone --recursive https://github.com/jmpews/Dobby.git dobby
 
-         - name: Setup Java
-           uses: actions/setup-java@v4
-           with:
-             distribution: 'temurin'
-             java-version: '17'
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-         - name: Setup Android SDK
-           uses: android-actions/setup-android@v3
+      - name: Setup Android SDK & NDK
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: 25.2.9519653
 
-         - name: Install Compatible NDK (r25b)
-           run: |
-             echo "Installing NDK r25b..."
-             sdkmanager --install "ndk;25.5.13033028"
-             echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.5.13033028" >> $GITHUB_ENV
+      - name: Build with CMake (arm64-v8a & armeabi-v7a)
+        run: |
+          mkdir build_arm64 && cd build_arm64
+          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+                -DANDROID_ABI=arm64-v8a \
+                -DANDROID_PLATFORM=android-24 \
+                -DCMAKE_BUILD_TYPE=Release ..
+          make
+          cd ..
 
-         - name: Build with CMake (arm64-v8a & armeabi-v7a)
-           run: |
-             mkdir build_arm64 && cd build_arm64
-             cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                   -DANDROID_ABI=arm64-v8a \
-                   -DANDROID_PLATFORM=android-24 \
-                   -DCMAKE_BUILD_TYPE=Release ..
-             make
-             cd ..
+          mkdir build_armv7 && cd build_armv7
+          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+                -DANDROID_ABI=armeabi-v7a \
+                -DANDROID_PLATFORM=android-24 \
+                -DCMAKE_BUILD_TYPE=Release ..
+          make
+          cd ..
 
-             mkdir build_armv7 && cd build_armv7
-             cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-                   -DANDROID_ABI=armeabi-v7a \
-                   -DANDROID_PLATFORM=android-24 \
-                   -DCMAKE_BUILD_TYPE=Release ..
-             make
-             cd ..
+      - name: Package Magisk Module ZIP
+        run: |
+          mkdir -p module_out/zygisk
+          mkdir -p module_out/META-INF/com/google/android
+          
+          cp build_arm64/libuptime_faker.so module_out/zygisk/arm64-v8a.so
+          cp build_armv7/libuptime_faker.so module_out/zygisk/armeabi-v7a.so
+          
+          cp module.prop module_out/
+          
+          echo "#MAGISK" > module_out/META-INF/com/google/android/updater-script
+          
+          cd module_out
+          zip -r ../UptimeFaker-Release.zip *
+          cd ..
 
-         - name: Package Magisk Module ZIP
-           run: |
-             mkdir -p module_out/zygisk
-             mkdir -p module_out/META-INF/com/google/android
-             
-             cp build_arm64/libuptime_faker.so module_out/zygisk/arm64-v8a.so
-             cp build_armv7/libuptime_faker.so module_out/zygisk/armeabi-v7a.so
-             
-             cp module.prop module_out/
-             
-             echo "#MAGISK" > module_out/META-INF/com/google/android/updater-script
-             
-             cd module_out
-             zip -r ../UptimeFaker-Release.zip *
-             cd ..
-
-         - name: Upload Build Artifact
-           uses: actions/upload-artifact@v4
-           with:
-             name: UptimeFaker-Release
-             path: UptimeFaker-Release.zip
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UptimeFaker-Release
+          path: UptimeFaker-Release.zip
