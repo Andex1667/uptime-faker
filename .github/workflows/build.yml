@@ -12,6 +12,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Download Dobby Source
+        run: |
+          git clone --recursive https://github.com/jmpews/Dobby.git dobby
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -43,14 +47,14 @@ jobs:
         run: |
           mkdir -p module_out/zygisk
           mkdir -p module_out/META-INF/com/google/android
-
+          
           cp build_arm64/libuptime_faker.so module_out/zygisk/arm64-v8a.so
           cp build_armv7/libuptime_faker.so module_out/zygisk/armeabi-v7a.so
-
+          
           cp module.prop module_out/
-
+          
           echo "#MAGISK" > module_out/META-INF/com/google/android/updater-script
-
+          
           cd module_out
           zip -r ../UptimeFaker-Release.zip *
           cd ..
