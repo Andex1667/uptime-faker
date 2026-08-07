@@ -2,7 +2,9 @@ name: Build Zygisk Module
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -10,213 +12,303 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # --------------------------------------------------
+      # Checkout
+      # --------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Dobby
-        run: |
-          set -e
 
-          git clone --recursive https://github.com/jmpews/Dobby.git dobby
+      # --------------------------------------------------
+      # Android SDK
+      # --------------------------------------------------
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Patch Dobby ARM64 Assembly
+
+      # --------------------------------------------------
+      # Install exact NDK version
+      # --------------------------------------------------
+      - name: Install Android NDK
         shell: bash
         run: |
           set -e
 
-          ASM="dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
-          echo "=== Original ARM64 assembly ==="
-          sed -n '45,55p' "$ASM"
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              "dobby/source/TrampolineBridge/"
-              "ClosureTrampolineBridge/arm64/"
-              "closure_bridge_arm64.asm"
-          )
-
-          text = path.read_text()
-
-          old1 = (
-              "adrp TMP_REG_0, "
-              "cdecl(common_closure_bridge_handler)@PAGE"
-          )
-
-          old2 = (
-              "add TMP_REG_0, TMP_REG_0, "
-              "cdecl(common_closure_bridge_handler)@PAGEOFF"
-          )
-
-          new1 = (
-              "adrp TMP_REG_0, "
-              "cdecl(common_closure_bridge_handler)"
-          )
-
-          new2 = (
-              "add TMP_REG_0, TMP_REG_0, "
-              ":lo12:cdecl(common_closure_bridge_handler)"
-          )
-
-          if old1 not in text:
-              raise SystemExit(
-                  "ERROR: original ADRP line not found. "
-                  "Dobby source may have changed."
-              )
-
-          if old2 not in text:
-              raise SystemExit(
-                  "ERROR: original ADD line not found. "
-                  "Dobby source may have changed."
-              )
-
-          text = text.replace(old1, new1)
-          text = text.replace(old2, new2)
-
-          path.write_text(text)
-
-          print("Dobby ARM64 assembly patched successfully.")
-          PY
-
-          echo "=== Patched ARM64 assembly ==="
-          sed -n '45,55p' "$ASM"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK
-        run: |
-          set -e
-
-          yes | sdkmanager --licenses >/dev/null || true
-
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-24"
           sdkmanager "ndk;23.2.8568313"
 
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/23.2.8568313" >> "$GITHUB_ENV"
 
-      - name: Verify Android NDK
+          echo "NDK installed:"
+          echo "$ANDROID_SDK_ROOT/ndk/23.2.8568313"
+
+
+      # --------------------------------------------------
+      # Verify toolchain
+      # --------------------------------------------------
+      - name: Verify Android Toolchain
+        shell: bash
         run: |
           set -e
-
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
 
           test -d "$ANDROID_NDK_HOME"
           test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
+          echo "=== NDK ==="
+          cat "$ANDROID_NDK_HOME/source.properties"
 
+          echo ""
+          echo "=== Clang ==="
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            --version
+
+          echo ""
+          echo "=== CMake ==="
+          cmake --version
+
+
+      # --------------------------------------------------
+      # Download Android-compatible Dobby
+      #
+      # IMPORTANT:
+      # Do NOT use jmpews/Dobby here.
+      # --------------------------------------------------
+      - name: Download Dobby
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf dobby
+
+          git clone --depth 1 \
+            https://github.com/JingMatrix/Dobby.git \
+            dobby
+
+          echo "=== Dobby revision ==="
+          cd dobby
+          git log -1 --oneline
+
+
+      # --------------------------------------------------
+      # Verify Dobby source
+      # --------------------------------------------------
+      - name: Verify Dobby
+        shell: bash
+        run: |
+          set -e
+
+          test -f dobby/CMakeLists.txt
+          test -f dobby/include/dobby.h
+          test -f dobby/source/dobby.cpp
+
+          echo "Dobby source OK"
+
+          echo ""
+          echo "Checking Android/ARM64 assembly..."
+
+          test -f \
+            dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+
+          echo "ARM64 assembly OK"
+
+
+      # --------------------------------------------------
+      # Build ARM64
+      # --------------------------------------------------
       - name: Build Arm64
+        shell: bash
         run: |
           set -e
 
           rm -rf build_arm64
-          mkdir build_arm64
-          cd build_arm64
 
-          cmake \
+          cmake -S . -B build_arm64 \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
-            -DDOBBY_BUILD_SHARED=OFF \
-            -DDOBBY_BUILD_STATIC=ON \
-            ..
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_DEBUG=OFF \
+            -DDOBBY_BUILD_EXAMPLE=OFF \
+            -DDOBBY_BUILD_TEST=OFF \
+            -DPrivate.Obfuscation=OFF
 
-          cmake --build . --parallel "$(nproc)"
+          cmake --build build_arm64 \
+            --parallel "$(nproc)"
 
+
+      # --------------------------------------------------
+      # Build ARMv7
+      # --------------------------------------------------
       - name: Build Armv7
+        shell: bash
         run: |
           set -e
 
           rm -rf build_armv7
-          mkdir build_armv7
-          cd build_armv7
 
-          cmake \
+          cmake -S . -B build_armv7 \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=armeabi-v7a \
             -DANDROID_PLATFORM=android-24 \
-            -DDOBBY_BUILD_SHARED=OFF \
-            -DDOBBY_BUILD_STATIC=ON \
-            ..
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_DEBUG=OFF \
+            -DDOBBY_BUILD_EXAMPLE=OFF \
+            -DDOBBY_BUILD_TEST=OFF \
+            -DPrivate.Obfuscation=OFF
 
-          cmake --build . --parallel "$(nproc)"
+          cmake --build build_armv7 \
+            --parallel "$(nproc)"
 
-      - name: Locate Built Libraries
-        run: |
-          echo "=== Arm64 build files ==="
-          find build_arm64 -type f \
-            \( \
-              -name "libuptime_faker.so" \
-              -o -name "libdobby*.a" \
-            \) \
-            -print
 
-          echo ""
-          echo "=== Armv7 build files ==="
-          find build_armv7 -type f \
-            \( \
-              -name "libuptime_faker.so" \
-              -o -name "libdobby*.a" \
-            \) \
-            -print
-
-      - name: Verify Libraries
+      # --------------------------------------------------
+      # Find generated libraries
+      # --------------------------------------------------
+      - name: Find Output Libraries
+        shell: bash
         run: |
           set -e
 
-          if [ ! -f "build_arm64/libuptime_faker.so" ]; then
-            echo "ERROR: build_arm64/libuptime_faker.so not found"
-            exit 1
-          fi
+          echo "================================"
+          echo "ARM64 outputs"
+          echo "================================"
 
-          if [ ! -f "build_armv7/libuptime_faker.so" ]; then
-            echo "ERROR: build_armv7/libuptime_faker.so not found"
-            exit 1
-          fi
-
-          echo "Arm64 library found:"
-          file build_arm64/libuptime_faker.so
+          find build_arm64 \
+            -type f \
+            \( \
+              -name "*.so" \
+              -o -name "*.a" \
+            \) \
+            -print
 
           echo ""
-          echo "Armv7 library found:"
-          file build_armv7/libuptime_faker.so
+          echo "================================"
+          echo "ARMv7 outputs"
+          echo "================================"
 
+          find build_armv7 \
+            -type f \
+            \( \
+              -name "*.so" \
+              -o -name "*.a" \
+            \) \
+            -print
+
+
+      # --------------------------------------------------
+      # Verify Uptime Faker library
+      # --------------------------------------------------
+      - name: Verify Uptime Faker
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for libuptime_faker.so..."
+
+          ARM64_LIB=$(find build_arm64 \
+            -type f \
+            -name "libuptime_faker.so" \
+            | head -n 1)
+
+          ARMV7_LIB=$(find build_armv7 \
+            -type f \
+            -name "libuptime_faker.so" \
+            | head -n 1)
+
+          if [ -z "$ARM64_LIB" ]; then
+            echo "ERROR: ARM64 libuptime_faker.so not found"
+            exit 1
+          fi
+
+          if [ -z "$ARMV7_LIB" ]; then
+            echo "ERROR: ARMv7 libuptime_faker.so not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "ARM64:"
+          echo "$ARM64_LIB"
+          file "$ARM64_LIB"
+
+          echo ""
+          echo "ARMv7:"
+          echo "$ARMV7_LIB"
+          file "$ARMV7_LIB"
+
+          echo ""
+          echo "Libraries verified."
+
+
+      # --------------------------------------------------
+      # Package module
+      # --------------------------------------------------
       - name: Package ZIP
+        shell: bash
         run: |
           set -e
 
           rm -rf dist
+          rm -f UptimeFaker.zip
+
           mkdir -p dist/zygisk
 
-          cp build_arm64/libuptime_faker.so \
-             dist/zygisk/arm64-v8a.so
+          ARM64_LIB=$(find build_arm64 \
+            -type f \
+            -name "libuptime_faker.so" \
+            | head -n 1)
 
-          cp build_armv7/libuptime_faker.so \
-             dist/zygisk/armeabi-v7a.so
+          ARMV7_LIB=$(find build_armv7 \
+            -type f \
+            -name "libuptime_faker.so" \
+            | head -n 1)
 
-          cp module.prop dist/
+          cp "$ARM64_LIB" \
+            dist/zygisk/arm64-v8a.so
+
+          cp "$ARMV7_LIB" \
+            dist/zygisk/armeabi-v7a.so
+
+          cp module.prop dist/module.prop
 
           cd dist
 
           zip -r ../UptimeFaker.zip .
 
+
+      # --------------------------------------------------
+      # Verify final ZIP
+      # --------------------------------------------------
       - name: Verify ZIP
+        shell: bash
         run: |
           set -e
 
-          echo "=== UptimeFaker.zip ==="
+          test -f UptimeFaker.zip
+
+          echo "================================"
+          echo "ZIP CONTENTS"
+          echo "================================"
+
           unzip -l UptimeFaker.zip
 
           echo ""
-          echo "=== ZIP test ==="
+          echo "================================"
+          echo "ZIP TEST"
+          echo "================================"
+
           unzip -t UptimeFaker.zip
 
+
+      # --------------------------------------------------
+      # Upload artifact
+      # --------------------------------------------------
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: UptimeFaker
           path: UptimeFaker.zip
+          if-no-files-found: error
