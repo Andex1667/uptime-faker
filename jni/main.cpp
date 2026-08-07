@@ -218,6 +218,19 @@ class UptimeFakerModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override { this->api = api; }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+        // 현재 실행 중인 프로세스(앱) 이름 가져오기
+        const char *process = args->nice_name;
+        if (process) {
+            // 바탕화면 런처, 시스템 UI, 네트워크/와이파이 관리 프로세스 등은 예외 처리하여 오류 방지
+            if (strstr(process, "com.android.systemui") ||
+                strstr(process, "launcher") ||
+                strstr(process, "com.android.providers") ||
+                strstr(process, "com.android.phone") ||
+                strstr(process, "android.process.media")) {
+                return;
+            }
+        }
+
         std::call_once(init_flag, &UptimeFakerModule::apply_all_hooks_atomic, this);
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {}
