@@ -15,6 +15,8 @@ jobs:
 
       - name: Download Dobby
         run: |
+          set -e
+
           git clone --recursive https://github.com/jmpews/Dobby.git dobby
 
       - name: Patch Dobby ARM64 Assembly
@@ -24,8 +26,8 @@ jobs:
 
           ASM="dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
 
-          echo "=== Original ARM64 relocation lines ==="
-          grep -nE 'adrp|PAGE|PAGEOFF' "$ASM" || true
+          echo "=== Original ARM64 assembly ==="
+          sed -n '45,55p' "$ASM"
 
           python3 <<'PY'
           from pathlib import Path
@@ -38,20 +40,36 @@ jobs:
 
           text = path.read_text()
 
-          old1 = "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE"
-          old2 = "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF"
+          old1 = (
+              "adrp TMP_REG_0, "
+              "cdecl(common_closure_bridge_handler)@PAGE"
+          )
 
-          new1 = "adrp TMP_REG_0, :pg_hi21:cdecl(common_closure_bridge_handler)"
-          new2 = "add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)"
+          old2 = (
+              "add TMP_REG_0, TMP_REG_0, "
+              "cdecl(common_closure_bridge_handler)@PAGEOFF"
+          )
+
+          new1 = (
+              "adrp TMP_REG_0, "
+              "cdecl(common_closure_bridge_handler)"
+          )
+
+          new2 = (
+              "add TMP_REG_0, TMP_REG_0, "
+              ":lo12:cdecl(common_closure_bridge_handler)"
+          )
 
           if old1 not in text:
               raise SystemExit(
-                  "ERROR: expected ADRP line was not found."
+                  "ERROR: original ADRP line not found. "
+                  "Dobby source may have changed."
               )
 
           if old2 not in text:
               raise SystemExit(
-                  "ERROR: expected ADD line was not found."
+                  "ERROR: original ADD line not found. "
+                  "Dobby source may have changed."
               )
 
           text = text.replace(old1, new1)
@@ -59,11 +77,11 @@ jobs:
 
           path.write_text(text)
 
-          print("ARM64 assembly patched successfully.")
+          print("Dobby ARM64 assembly patched successfully.")
           PY
 
-          echo "=== Patched ARM64 relocation lines ==="
-          grep -nE 'adrp|PAGE|PAGEOFF|pg_hi21|lo12' "$ASM" || true
+          echo "=== Patched ARM64 assembly ==="
+          sed -n '45,55p' "$ASM"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -71,6 +89,8 @@ jobs:
       - name: Install Android NDK
         run: |
           set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager "ndk;23.2.8568313"
 
@@ -83,7 +103,6 @@ jobs:
 
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          echo "ANDROID_NDK=$ANDROID_NDK"
 
           test -d "$ANDROID_NDK_HOME"
           test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
@@ -126,26 +145,52 @@ jobs:
 
           cmake --build . --parallel "$(nproc)"
 
-      - name: Locate Built Library
+      - name: Locate Built Libraries
         run: |
-          echo "=== Arm64 ==="
+          echo "=== Arm64 build files ==="
           find build_arm64 -type f \
-            \( -name "libuptime_faker.so" -o -name "libdobby*.a" \) \
+            \( \
+              -name "libuptime_faker.so" \
+              -o -name "libdobby*.a" \
+            \) \
             -print
 
-          echo "=== Armv7 ==="
+          echo ""
+          echo "=== Armv7 build files ==="
           find build_armv7 -type f \
-            \( -name "libuptime_faker.so" -o -name "libdobby*.a" \) \
+            \( \
+              -name "libuptime_faker.so" \
+              -o -name "libdobby*.a" \
+            \) \
             -print
+
+      - name: Verify Libraries
+        run: |
+          set -e
+
+          if [ ! -f "build_arm64/libuptime_faker.so" ]; then
+            echo "ERROR: build_arm64/libuptime_faker.so not found"
+            exit 1
+          fi
+
+          if [ ! -f "build_armv7/libuptime_faker.so" ]; then
+            echo "ERROR: build_armv7/libuptime_faker.so not found"
+            exit 1
+          fi
+
+          echo "Arm64 library found:"
+          file build_arm64/libuptime_faker.so
+
+          echo ""
+          echo "Armv7 library found:"
+          file build_armv7/libuptime_faker.so
 
       - name: Package ZIP
         run: |
           set -e
 
+          rm -rf dist
           mkdir -p dist/zygisk
-
-          test -f build_arm64/libuptime_faker.so
-          test -f build_armv7/libuptime_faker.so
 
           cp build_arm64/libuptime_faker.so \
              dist/zygisk/arm64-v8a.so
@@ -156,12 +201,19 @@ jobs:
           cp module.prop dist/
 
           cd dist
+
           zip -r ../UptimeFaker.zip .
 
       - name: Verify ZIP
         run: |
-          echo "=== ZIP contents ==="
+          set -e
+
+          echo "=== UptimeFaker.zip ==="
           unzip -l UptimeFaker.zip
+
+          echo ""
+          echo "=== ZIP test ==="
+          unzip -t UptimeFaker.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
