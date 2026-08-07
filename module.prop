@@ -1,6 +1,6 @@
 id=uptime_faker
-name=Uptime Faker Zygisk
+name=Uptime Faker
 version=v1.0
 versionCode=1
-author=Developer
-description=Fakes system uptime, boot time, and process start time.
+author=Andex1667
+description=Zygisk module to fake uptime and boot time.
