@@ -1,0 +1,6 @@
+id=uptime_faker
+name=Uptime Faker Zygisk
+version=v1.0
+versionCode=1
+author=Developer
+description=Fakes system uptime, boot time, and process start time.
