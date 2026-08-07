@@ -11,8 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Dobby
-        run: git clone --recursive https://github.com/jmpews/Dobby.git dobby
+      - name: Download Patched Dobby
+        run: git clone --recursive https://github.com/chiteroman/Dobby.git dobby
 
       - name: Setup Android SDK & NDK (r23b)
         uses: android-actions/setup-android@v3
