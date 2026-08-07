@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <errno.h>
 #include <dobby.h>
 #include "zygisk.hpp"
 
@@ -219,6 +220,32 @@ static int handle_target_openat(int dirfd, const char *pathname, int flags, mode
     return static_cast<int>(syscall(syscall_num, dirfd, pathname, flags, mode));
 }
 
+static int handle_target_open(const char *pathname, int flags, mode_t mode, int (*orig_func)(const char*, int, ...), int syscall_num) {
+    if (pathname) {
+        if (strcmp(pathname, "/proc/uptime") == 0) {
+            int fake_fd = generate_fake_uptime_fd();
+            if (fake_fd >= 0) return fake_fd;
+        } else if (strcmp(pathname, "/proc/stat") == 0) {
+            int real_fd = orig_func ? orig_func(pathname, flags, mode) : static_cast<int>(syscall(syscall_num, pathname, flags, mode));
+            if (real_fd >= 0) {
+                int fake_fd = generate_fake_stat_fd(real_fd);
+                if (fake_fd >= 0) return fake_fd;
+            }
+        } else if (is_path_match(pathname, "/proc/self/stat")) {
+            int real_fd = orig_func ? orig_func(pathname, flags, mode) : static_cast<int>(syscall(syscall_num, pathname, flags, mode));
+            if (real_fd >= 0) {
+                int fake_fd = generate_fake_stat_self_fd(real_fd);
+                if (fake_fd >= 0) return fake_fd;
+            }
+        }
+    }
+
+    if (orig_func) {
+        return (flags & (O_CREAT | O_TMPFILE)) ? orig_func(pathname, flags, mode) : orig_func(pathname, flags);
+    }
+    return static_cast<int>(syscall(syscall_num, pathname, flags, mode));
+}
+
 int my_openat(int dirfd, const char *pathname, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -250,7 +277,7 @@ int my_open(const char *pathname, int flags, ...) {
         va_end(args);
     }
 #ifdef __NR_open
-    return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_open, __NR_open);
+    return handle_target_open(pathname, flags, mode, orig_open, __NR_open);
 #else
     return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_openat, __NR_openat);
 #endif
@@ -265,7 +292,7 @@ int my_open64(const char *pathname, int flags, ...) {
         va_end(args);
     }
 #ifdef __NR_open
-    return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_open64, __NR_open);
+    return handle_target_open(pathname, flags, mode, orig_open64, __NR_open);
 #else
     return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_openat64, __NR_openat);
 #endif
