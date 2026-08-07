@@ -12,15 +12,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download Dobby Source
-        run: |
-          git clone --recursive https://github.com/jmpews/Dobby.git dobby
-          # 에러를 일으키는 주범인 구형 ARM64 어셈블리 파일을 빈 파일로 날려버림
-          rm -f dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+        run: git clone --recursive https://github.com/jmpews/Dobby.git dobby
 
       - name: Setup Android SDK & NDK (r23b)
         uses: android-actions/setup-android@v3
         with:
           ndk-version: 23.2.8568313
+
+      - name: Force NDK 23 (Remove conflicting NDK 27)
+        run: |
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/27.*
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
 
       - name: Build Arm64
         run: |
