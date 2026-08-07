@@ -48,7 +48,7 @@ public:
 
     virtual void postServerSpecialize(
         [[maybe_unused]] const ServerSpecializeArgs *args
-    {}
+    ) {}
 };
 
 struct AppSpecializeArgs {
@@ -143,17 +143,17 @@ private:
     );
 };
 
-#define REGISTER_ZYGISK_MODULE(clazz)                                      \
-    void zygisk_module_entry(                                             \
-        zygisk::internal::api_table *table,                               \
-        JNIEnv *env                                                       \
-    ) {                                                                   \
-        zygisk::internal::entry_impl<clazz>(table, env);                  \
+#define REGISTER_ZYGISK_MODULE(clazz)                                  \
+    void zygisk_module_entry(                                         \
+        zygisk::internal::api_table *table,                           \
+        JNIEnv *env                                                   \
+    ) {                                                               \
+        zygisk::internal::entry_impl<clazz>(table, env);              \
     }
 
-#define REGISTER_ZYGISK_COMPANION(func)                                   \
-    void zygisk_companion_entry(int client) {                             \
-        func(client);                                                      \
+#define REGISTER_ZYGISK_COMPANION(func)                               \
+    void zygisk_companion_entry(int client) {                         \
+        func(client);                                                  \
     }
 
 namespace internal {
