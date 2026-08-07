@@ -12,8 +12,6 @@
 #include <atomic>
 #include <mutex>
 #include <string>
-#include <vector>
-#include <sstream>
 #include <random>
 #include <errno.h>
 #include <dobby.h>
@@ -40,9 +38,7 @@
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-#define USER_HZ 100
-
-// 랜덤 오프셋 생성 함수 (시간(hour) 단위 입력받아 초(second)로 변환)
+// 랜덤 오프셋 생성 함수 (시간 단위 -> 초 단위 변환)
 static unsigned long get_random_offset(unsigned long min_h, unsigned long max_h) {
     static std::random_device rd;
     static std::mt19937 gen(rd());
@@ -50,35 +46,18 @@ static unsigned long get_random_offset(unsigned long min_h, unsigned long max_h)
     return dis(gen);
 }
 
-// 부팅 시간 오프셋: 600 ~ 800 시간 사이 랜덤
-// Monotonic 시간 오프셋: 300 ~ 400 시간 사이 랜덤
+// 부팅 시간 오프셋: 600 ~ 800 시간 랜덤
+// Monotonic 시간 오프셋: 300 ~ 400 시간 랜덤
 static unsigned long kBootTimeOffsetSec = get_random_offset(600, 800);
 static unsigned long kMonotonicOffsetSec = get_random_offset(300, 400);
 
 static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
-
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, ...) = nullptr;
-static int (*orig_openat64)(int dirfd, const char *pathname, int flags, ...) = nullptr;
 static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
-static int (*orig_open64)(const char *pathname, int flags, ...) = nullptr;
-
 static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
 
-static bool read_all_from_fd(int fd, std::string &out_data) {
-    out_data.clear();
-    char buffer[4096];
-    ssize_t bytes_read = 0;
-    while ((bytes_read = read(fd, buffer, sizeof(buffer))) != 0) {
-        if (bytes_read < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        out_data.append(buffer, static_cast<size_t>(bytes_read));
-    }
-    return true;
-}
-
+// 가상 파일 생성 (가벼운 memfd 또는 pipe 활용)
 static int create_virtual_fd(const std::string &content) {
     const char *data = content.data();
     size_t len = content.size();
@@ -106,6 +85,7 @@ static int create_virtual_fd(const std::string &content) {
     return -1;
 }
 
+// /proc/uptime 전용 가상 파일 생성
 static int generate_fake_uptime_fd() {
     struct timespec ts_boot_real, ts_mono_real;
     if (orig_clock_gettime) {
@@ -119,7 +99,6 @@ static int generate_fake_uptime_fd() {
     double real_boot = static_cast<double>(ts_boot_real.tv_sec) + (static_cast<double>(ts_boot_real.tv_nsec) / 1e9);
     double real_mono = static_cast<double>(ts_mono_real.tv_sec) + (static_cast<double>(ts_mono_real.tv_nsec) / 1e9);
     
-    // /proc/uptime 첫 번째 값은 boottime 기준 적용
     double fake_boot = real_boot + kBootTimeOffsetSec;
 
     long num_cores = sysconf(_SC_NPROCESSORS_CONF);
@@ -135,134 +114,7 @@ static int generate_fake_uptime_fd() {
     return create_virtual_fd(std::string(buf, len));
 }
 
-static int generate_fake_stat_fd(int real_fd) {
-    std::string raw_content;
-    if (!read_all_from_fd(real_fd, raw_content)) {
-        close(real_fd);
-        return -1;
-    }
-    close(real_fd);
-
-    std::istringstream stream(raw_content);
-    std::string line;
-    std::string fake_content;
-    fake_content.reserve(raw_content.size() + 64);
-
-    while (std::getline(stream, line)) {
-        if (line.rfind("btime ", 0) == 0) {
-            try {
-                unsigned long real_btime = std::stoul(line.substr(6));
-                unsigned long fake_btime = (real_btime > kBootTimeOffsetSec) ? (real_btime - kBootTimeOffsetSec) : real_btime;
-                fake_content += "btime " + std::to_string(fake_btime) + "\n";
-            } catch (...) {
-                fake_content += line + "\n";
-            }
-        } else {
-            fake_content += line + "\n";
-        }
-    }
-    return create_virtual_fd(fake_content);
-}
-
-static int generate_fake_stat_self_fd(int real_fd) {
-    std::string raw_content;
-    if (!read_all_from_fd(real_fd, raw_content)) {
-        close(real_fd);
-        return -1;
-    }
-    close(real_fd);
-
-    size_t rparen_pos = raw_content.rfind(')');
-    if (rparen_pos == std::string::npos) return create_virtual_fd(raw_content);
-
-    std::string prefix = raw_content.substr(0, rparen_pos + 1);
-    std::string suffix = raw_content.substr(rparen_pos + 1);
-
-    std::vector<std::string> tokens;
-    std::istringstream iss(suffix);
-    std::string token;
-    while (iss >> token) tokens.push_back(token);
-
-    if (tokens.size() > 19) {
-        try {
-            unsigned long long real_starttime = std::stoull(tokens[19]);
-            unsigned long long offset_jiffies = static_cast<unsigned long long>(kBootTimeOffsetSec) * USER_HZ;
-            tokens[19] = std::to_string(real_starttime + offset_jiffies);
-        } catch (...) {}
-    }
-
-    std::string fake_content = prefix;
-    for (const auto &t : tokens) fake_content += " " + t;
-    fake_content += "\n";
-
-    return create_virtual_fd(fake_content);
-}
-
-static bool is_path_match(const char *path, const char *target) {
-    if (!path) return false;
-    if (strcmp(path, target) == 0) return true;
-    if (strcmp(path, "/proc/self/stat") == 0 && strcmp(target, "/proc/self/stat") == 0) return true;
-    if (strncmp(path, "/proc/", 6) == 0 && strstr(path, "/stat") != nullptr) {
-        pid_t pid = getpid();
-        char self_path[64];
-        snprintf(self_path, sizeof(self_path), "/proc/%d/stat", pid);
-        if (strcmp(path, self_path) == 0) return true;
-    }
-    return false;
-}
-
-static int handle_target_openat(int dirfd, const char *pathname, int flags, mode_t mode, int (*orig_func)(int, const char*, int, ...), int syscall_num) {
-    if (pathname) {
-        if (strcmp(pathname, "/proc/uptime") == 0) {
-            int fake_fd = generate_fake_uptime_fd();
-            if (fake_fd >= 0) return fake_fd;
-        } else if (strcmp(pathname, "/proc/stat") == 0) {
-            int real_fd = orig_func ? orig_func(dirfd, pathname, flags, mode) : static_cast<int>(syscall(syscall_num, dirfd, pathname, flags, mode));
-            if (real_fd >= 0) {
-                int fake_fd = generate_fake_stat_fd(real_fd);
-                if (fake_fd >= 0) return fake_fd;
-            }
-        } else if (is_path_match(pathname, "/proc/self/stat")) {
-            int real_fd = orig_func ? orig_func(dirfd, pathname, flags, mode) : static_cast<int>(syscall(syscall_num, dirfd, pathname, flags, mode));
-            if (real_fd >= 0) {
-                int fake_fd = generate_fake_stat_self_fd(real_fd);
-                if (fake_fd >= 0) return fake_fd;
-            }
-        }
-    }
-
-    if (orig_func) {
-        return (flags & (O_CREAT | O_TMPFILE)) ? orig_func(dirfd, pathname, flags, mode) : orig_func(dirfd, pathname, flags);
-    }
-    return static_cast<int>(syscall(syscall_num, dirfd, pathname, flags, mode));
-}
-
-static int handle_target_open(const char *pathname, int flags, mode_t mode, int (*orig_func)(const char*, int, ...), int syscall_num) {
-    if (pathname) {
-        if (strcmp(pathname, "/proc/uptime") == 0) {
-            int fake_fd = generate_fake_uptime_fd();
-            if (fake_fd >= 0) return fake_fd;
-        } else if (strcmp(pathname, "/proc/stat") == 0) {
-            int real_fd = orig_func ? orig_func(pathname, flags, mode) : static_cast<int>(syscall(syscall_num, pathname, flags, mode));
-            if (real_fd >= 0) {
-                int fake_fd = generate_fake_stat_fd(real_fd);
-                if (fake_fd >= 0) return fake_fd;
-            }
-        } else if (is_path_match(pathname, "/proc/self/stat")) {
-            int real_fd = orig_func ? orig_func(pathname, flags, mode) : static_cast<int>(syscall(syscall_num, pathname, flags, mode));
-            if (real_fd >= 0) {
-                int fake_fd = generate_fake_stat_self_fd(real_fd);
-                if (fake_fd >= 0) return fake_fd;
-            }
-        }
-    }
-
-    if (orig_func) {
-        return (flags & (O_CREAT | O_TMPFILE)) ? orig_func(pathname, flags, mode) : orig_func(pathname, flags);
-    }
-    return static_cast<int>(syscall(syscall_num, pathname, flags, mode));
-}
-
+// openat 후킹 (/proc/uptime만 안전하게 가로챔)
 int my_openat(int dirfd, const char *pathname, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -271,20 +123,19 @@ int my_openat(int dirfd, const char *pathname, int flags, ...) {
         mode = static_cast<mode_t>(va_arg(args, int));
         va_end(args);
     }
-    return handle_target_openat(dirfd, pathname, flags, mode, orig_openat, __NR_openat);
-}
 
-int my_openat64(int dirfd, const char *pathname, int flags, ...) {
-    mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
-        va_list args;
-        va_start(args, flags);
-        mode = static_cast<mode_t>(va_arg(args, int));
-        va_end(args);
+    if (pathname && strcmp(pathname, "/proc/uptime") == 0) {
+        int fake_fd = generate_fake_uptime_fd();
+        if (fake_fd >= 0) return fake_fd;
     }
-    return handle_target_openat(dirfd, pathname, flags, mode, orig_openat64, __NR_openat);
+
+    if (orig_openat) {
+        return (flags & (O_CREAT | O_TMPFILE)) ? orig_openat(dirfd, pathname, flags, mode) : orig_openat(dirfd, pathname, flags);
+    }
+    return static_cast<int>(syscall(__NR_openat, dirfd, pathname, flags, mode));
 }
 
+// open 후킹
 int my_open(const char *pathname, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -293,29 +144,23 @@ int my_open(const char *pathname, int flags, ...) {
         mode = static_cast<mode_t>(va_arg(args, int));
         va_end(args);
     }
-#ifdef __NR_open
-    return handle_target_open(pathname, flags, mode, orig_open, __NR_open);
-#else
-    return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_openat, __NR_openat);
-#endif
-}
 
-int my_open64(const char *pathname, int flags, ...) {
-    mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
-        va_list args;
-        va_start(args, flags);
-        mode = static_cast<mode_t>(va_arg(args, int));
-        va_end(args);
+    if (pathname && strcmp(pathname, "/proc/uptime") == 0) {
+        int fake_fd = generate_fake_uptime_fd();
+        if (fake_fd >= 0) return fake_fd;
     }
+
 #ifdef __NR_open
-    return handle_target_open(pathname, flags, mode, orig_open64, __NR_open);
+    if (orig_open) {
+        return (flags & (O_CREAT | O_TMPFILE)) ? orig_open(pathname, flags, mode) : orig_open(pathname, flags);
+    }
+    return static_cast<int>(syscall(__NR_open, pathname, flags, mode));
 #else
-    return handle_target_openat(AT_FDCWD, pathname, flags, mode, orig_openat64, __NR_openat);
+    return my_openat(AT_FDCWD, pathname, flags, mode);
 #endif
 }
 
-// 시간 종류에 따라 다른 오프셋 적용 (BOOTTIME vs MONOTONIC)
+// 시간 오프셋 적용 (BOOTTIME과 MONOTONIC 분기)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
     if (clk_id == CLOCK_BOOTTIME) {
         tp->tv_sec += kBootTimeOffsetSec;
@@ -337,7 +182,7 @@ int my___clock_gettime(clockid_t clk_id, struct timespec *tp) {
     return ret;
 }
 
-// 부트 카운트 속성 조작 (13회 고정)
+// 부트 카운트 조작 (13회 고정)
 int my___system_property_get(const char *key, char *value) {
     if (key && strcmp(key, "sys.boot_count") == 0) {
         if (value) {
@@ -388,9 +233,7 @@ private:
         if (!success) return;
 
         safe_hook("__clock_gettime", reinterpret_cast<void *>(my___clock_gettime), reinterpret_cast<void **>(&orig___clock_gettime), false);
-        safe_hook("openat64", reinterpret_cast<void *>(my_openat64), reinterpret_cast<void **>(&orig_openat64), false);
         safe_hook("open", reinterpret_cast<void *>(my_open), reinterpret_cast<void **>(&orig_open), false);
-        safe_hook("open64", reinterpret_cast<void *>(my_open64), reinterpret_cast<void **>(&orig_open64), false);
         safe_hook("__system_property_get", reinterpret_cast<void *>(my___system_property_get), reinterpret_cast<void **>(&orig___system_property_get), false);
     }
 };
