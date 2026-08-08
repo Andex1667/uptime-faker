@@ -45,25 +45,28 @@ static int (*orig___system_property_get)(const char *key, char *value) = nullptr
 static bool should_fake_time() {
     const char *prog = getprogname();
     if (!prog) return true;
-
-    // 와이파이, 런처, 시스템 UI, 통신 등 불안정을 유발하는 시스템 프로세스 예외 처리
+    
     if (strstr(prog, "systemui") ||
         strstr(prog, "launcher") ||
         strstr(prog, "wifi") ||
+        strstr(prog, "netd") ||
         strstr(prog, "telecom") ||
+        strstr(prog, "telephony") || // <-- 전화 및 통신 관련 서비스
+        strstr(prog, "audio") ||     // <-- 오디오/미디어 재생 관련 (사운드 딜레이/렉 방지)
+        strstr(prog, "surfaceflinger") || // <-- 화면 렌더링 및 UI 합성 (전체적인 화면 버벅임 방지)
+        strstr(prog, "mediaserver") || // <-- 미디어 처리 백그라운드
         strstr(prog, "bluetooth") ||
         strstr(prog, "nfc") ||
         strstr(prog, "shell") ||
         strstr(prog, "chrome") ||
-        strstr(prog, "gms") ||      // <-- 구글 플레이 서비스 (Google Mobile Services)
-        strstr(prog, "naver") ||    // <-- 네이버 앱
+        strstr(prog, "gms") ||
+        strstr(prog, "naver") ||
         strcmp(prog, "zygote") == 0 ||
         strcmp(prog, "zygote64") == 0) {
         return false;
     }
     return true;
 }
-
 // 시간 오프셋 적용 (필터 통과한 앱 및 설정 앱만 변조)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
     if (!should_fake_time()) return;
