@@ -2,7 +2,9 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/syscall.h>
+#include <sys/mman.h>
 #include <android/log.h>
 #include <atomic>
 #include <mutex>
@@ -37,9 +39,12 @@ static unsigned long kBootTimeOffsetSec = get_random_offset(600, 800);
 static unsigned long kMonotonicOffsetSec = get_random_offset(300, 400);
 static int kBootCount = get_random_boot_count();
 
+// 원본 함수 포인터들
 static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
+static int (*orig_open)(const char *pathname, int flags, mode_t mode) = nullptr;
+static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode) = nullptr;
 
 // 현재 프로세스가 설정 앱인지 확인
 static bool is_settings_app() {
@@ -47,7 +52,7 @@ static bool is_settings_app() {
     return prog && strstr(prog, "settings") != nullptr;
 }
 
-// 시스템 코어 및 네트워크 데몬 예외 처리 (설정 앱은 통과시켜 BOOTTIME만 조작 가능하게 함)
+// 시스템 코어, 런처, 네트워크 데몬 및 통신 관련 예외 처리 (폰 먹통 및 와이파이 렉 방지)
 static bool should_fake_time() {
     const char *prog = getprogname();
     if (!prog) return true;
@@ -73,10 +78,9 @@ static bool should_fake_time() {
     return true;
 }
 
-// 시간 오프셋 정밀 적용 (설정 앱은 타임아웃 렉 방지를 위해 BOOTTIME만 조작)
+// 시간 오프셋 정밀 적용 (설정 앱은 모노토닉을 유지하여 렉 방지, BOOTTIME만 조작)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
     if (is_settings_app()) {
-        // 설정 앱은 가동시간 표시를 위해 BOOTTIME만 변조하고, 모노토닉은 건드리지 않음
         if (clk_id == CLOCK_BOOTTIME) {
             tp->tv_sec += kBootTimeOffsetSec;
         }
@@ -85,7 +89,6 @@ static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
 
     if (!should_fake_time()) return;
 
-    // 일반 타겟 앱 (틱톡 라이트 등)은 모두 적용
     if (clk_id == CLOCK_BOOTTIME) {
         tp->tv_sec += kBootTimeOffsetSec;
     } else if (clk_id == CLOCK_MONOTONIC) {
@@ -122,6 +125,50 @@ int my___system_property_get(const char *key, char *value) {
         return orig___system_property_get(key, value);
     }
     return -1;
+}
+
+// /proc/uptime 요청을 가로채서 가짜 데이터를 담은 메모리 파일 디스크립터를 반환
+static int create_fake_uptime_fd() {
+    // 실제 원본 uptime을 가져와서 오프셋을 더함
+    struct timespec tp;
+    if (orig_clock_gettime) {
+        orig_clock_gettime(CLOCK_BOOTTIME, &tp);
+    } else {
+        syscall(__NR_clock_gettime, CLOCK_BOOTTIME, &tp);
+    }
+    
+    if (should_fake_time()) {
+        tp.tv_sec += kBootTimeOffsetSec;
+    }
+
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf), "%lu.00 %lu.00\n", tp.tv_sec, tp.tv_sec);
+
+    // 메모리 기반 임시 파일 생성 (디스크 저장 없음)
+    int fd = syscall(__NR_memfd_create, "uptime_fake", MFD_CLOEXEC);
+    if (fd != -1) {
+        write(fd, buf, len);
+        lseek(fd, 0, SEEK_SET);
+    }
+    return fd;
+}
+
+// open 후킹
+int my_open(const char *pathname, int flags, mode_t mode) {
+    if (pathname && strstr(pathname, "proc/uptime")) {
+        int fake_fd = create_fake_uptime_fd();
+        if (fake_fd != -1) return fake_fd;
+    }
+    return orig_open ? orig_open(pathname, flags, mode) : open(pathname, flags, mode);
+}
+
+// openat 후킹
+int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (pathname && strstr(pathname, "proc/uptime")) {
+        int fake_fd = create_fake_uptime_fd();
+        if (fake_fd != -1) return fake_fd;
+    }
+    return orig_openat ? orig_openat(dirfd, pathname, flags, mode) : openat(dirfd, pathname, flags, mode);
 }
 
 static bool safe_hook(const char *symbol, void *new_func, void **orig_func, bool required) {
@@ -161,6 +208,8 @@ private:
 
         safe_hook("__clock_gettime", reinterpret_cast<void *>(my___clock_gettime), reinterpret_cast<void **>(&orig___clock_gettime), false);
         safe_hook("__system_property_get", reinterpret_cast<void *>(my___system_property_get), reinterpret_cast<void **>(&orig___system_property_get), false);
+        safe_hook("open", reinterpret_cast<void *>(my_open), reinterpret_cast<void **>(&orig_open), false);
+        safe_hook("openat", reinterpret_cast<void *>(my_openat), reinterpret_cast<void **>(&orig_openat), false);
     }
 };
 
