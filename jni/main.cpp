@@ -41,21 +41,28 @@ static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullpt
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
 
-// 네트워크 및 시스템 코어 렉 유발 프로세스만 정밀 예외 처리 (설정 앱 등은 정상적으로 가동시간 표시 허용)
+// 현재 프로세스가 설정 앱인지 확인
+static bool is_settings_app() {
+    const char *prog = getprogname();
+    return prog && strstr(prog, "settings") != nullptr;
+}
+
+// 시스템 코어 및 네트워크 데몬 예외 처리 (설정 앱은 통과시켜 BOOTTIME만 조작 가능하게 함)
 static bool should_fake_time() {
     const char *prog = getprogname();
     if (!prog) return true;
     
-    if (strstr(prog, "wifi") ||
-        strstr(prog, "netd") ||          // 네트워크 데몬 (와이파이 속도 저하 해결)
+    if (strstr(prog, "launcher") ||      // 바탕화면 런처
+        strstr(prog, "wifi") ||
+        strstr(prog, "netd") ||          // 네트워크 데몬
         strstr(prog, "network_stack") || // 안드로이드 네트워크 스택
         strstr(prog, "dnsmasq") ||       // DNS 관련
         strstr(prog, "dhcpcd") ||        // IP 할당 및 DHCP
         strstr(prog, "connectivity") ||  // 연결 관리 서비스
         strstr(prog, "telecom") ||
         strstr(prog, "telephony") ||     // 전화 및 통신 관련 서비스
-        strstr(prog, "audio") ||         // 오디오/미디어 재생 관련 (사운드 딜레이/렉 방지)
-        strstr(prog, "surfaceflinger") ||// 화면 렌더링 및 UI 합성 (전체적인 화면 버벅임 방지)
+        strstr(prog, "audio") ||         // 오디오/미디어 재생 관련
+        strstr(prog, "surfaceflinger") ||// 화면 렌더링 및 UI 합성
         strstr(prog, "mediaserver") ||   // 미디어 처리 백그라운드
         strstr(prog, "bluetooth") ||
         strstr(prog, "nfc") ||
@@ -66,10 +73,19 @@ static bool should_fake_time() {
     return true;
 }
 
-// 시간 오프셋 적용
+// 시간 오프셋 정밀 적용 (설정 앱은 타임아웃 렉 방지를 위해 BOOTTIME만 조작)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
+    if (is_settings_app()) {
+        // 설정 앱은 가동시간 표시를 위해 BOOTTIME만 변조하고, 모노토닉은 건드리지 않음
+        if (clk_id == CLOCK_BOOTTIME) {
+            tp->tv_sec += kBootTimeOffsetSec;
+        }
+        return;
+    }
+
     if (!should_fake_time()) return;
 
+    // 일반 타겟 앱 (틱톡 라이트 등)은 모두 적용
     if (clk_id == CLOCK_BOOTTIME) {
         tp->tv_sec += kBootTimeOffsetSec;
     } else if (clk_id == CLOCK_MONOTONIC) {
