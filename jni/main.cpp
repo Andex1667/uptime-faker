@@ -9,6 +9,8 @@
 #include <atomic>
 #include <mutex>
 #include <random>
+#include <unwind.h>
+#include <dlfcn.h>
 #include <dobby.h>
 #include "zygisk.hpp"
 
@@ -33,44 +35,74 @@ static int get_random_boot_count() {
     return dis(gen);
 }
 
-// 부팅 시간 오프셋: 600 ~ 800 시간 랜덤
-// Monotonic 시간 오프셋: 300 ~ 400 시간 랜덤
 static unsigned long kBootTimeOffsetSec = get_random_offset(600, 800);
 static unsigned long kMonotonicOffsetSec = get_random_offset(300, 400);
 static int kBootCount = get_random_boot_count();
 
-// 원본 함수 포인터들
 static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
 static int (*orig_open)(const char *pathname, int flags, mode_t mode) = nullptr;
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode) = nullptr;
 
-// 현재 프로세스가 설정 앱인지 확인
-static bool is_settings_app() {
-    const char *prog = getprogname();
-    return prog && strstr(prog, "settings") != nullptr;
+// 스택 추적용 구조체
+struct StackState {
+    bool is_wifi_related;
+};
+
+// 백트레이스 콜백 함수 (호출 주소의 심볼을 분석하여 와이파이 관련 로직인지 판별)
+static _Unwind_Reason_Code unwind_callback(struct _Unwind_Context *context, void *arg) {
+    StackState *state = static_cast<StackState *>(arg);
+    uintptr_t pc = _Unwind_GetIP(context);
+    if (pc == 0) return _Unwind_Reason_Code::_URC_END_OF_STACK;
+
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void *>(pc), &info) && info.dli_sname) {
+        // 와이파이, 스캔, 타임아웃, 네트워크 관련 키워드가 스택에 감지되면 true 설정
+        if (strstr(info.dli_sname, "Wifi") ||
+            strstr(info.dli_sname, "Scan") ||
+            strstr(info.dli_sname, "Network") ||
+            strstr(info.dli_sname, "Timeout") ||
+            strstr(info.dli_sname, "Connectivity")) {
+            state->is_wifi_related = true;
+            return _Unwind_Reason_Code::_URC_END_OF_STACK;
+        }
+    }
+    return _Unwind_Reason_Code::_URC_NO_REASON;
 }
 
-// 시스템 코어, 런처, 네트워크 데몬 및 통신 관련 예외 처리 (폰 먹통 및 와이파이 렉 방지)
+// 설정 앱 내부일 때, 와이파이 관련 호출인지 검사
+static bool should_bypass_settings_fake() {
+    StackState state = { false };
+    _Unwind_Backtrace(unwind_callback, &state);
+    return state.is_wifi_related;
+}
+
+// 일반 앱 및 시스템 프로세스 예외 처리
 static bool should_fake_time() {
     const char *prog = getprogname();
     if (!prog) return true;
     
-    if (strstr(prog, "launcher") ||      // 바탕화면 런처
+    if (strstr(prog, "systemui") ||
+        strstr(prog, "launcher") ||
         strstr(prog, "wifi") ||
-        strstr(prog, "netd") ||          // 네트워크 데몬
-        strstr(prog, "network_stack") || // 안드로이드 네트워크 스택
-        strstr(prog, "dnsmasq") ||       // DNS 관련
-        strstr(prog, "dhcpcd") ||        // IP 할당 및 DHCP
-        strstr(prog, "connectivity") ||  // 연결 관리 서비스
+        strstr(prog, "netd") ||
+        strstr(prog, "network_stack") ||
+        strstr(prog, "dnsmasq") ||
+        strstr(prog, "dhcpcd") ||
+        strstr(prog, "connectivity") ||
         strstr(prog, "telecom") ||
-        strstr(prog, "telephony") ||     // 전화 및 통신 관련 서비스
-        strstr(prog, "audio") ||         // 오디오/미디어 재생 관련
-        strstr(prog, "surfaceflinger") ||// 화면 렌더링 및 UI 합성
-        strstr(prog, "mediaserver") ||   // 미디어 처리 백그라운드
+        strstr(prog, "telephony") ||
+        strstr(prog, "audio") ||
+        strstr(prog, "surfaceflinger") ||
+        strstr(prog, "mediaserver") ||
         strstr(prog, "bluetooth") ||
         strstr(prog, "nfc") ||
+        strstr(prog, "chrome") ||
+        strstr(prog, "naver") ||
+        strstr(prog, "youtube") ||
+        strstr(prog, "gms") ||
+        strstr(prog, "shell") ||
         strcmp(prog, "zygote") == 0 ||
         strcmp(prog, "zygote64") == 0) {
         return false;
@@ -78,9 +110,17 @@ static bool should_fake_time() {
     return true;
 }
 
-// 시간 오프셋 정밀 적용 (설정 앱은 모노토닉을 유지하여 렉 방지, BOOTTIME만 조작)
+// 시간 오프셋 적용 (설정 앱은 와이파이 함수가 아닐 때만 BOOTTIME 조작)
 static void apply_time_offset(clockid_t clk_id, struct timespec *tp) {
-    if (is_settings_app()) {
+    const char *prog = getprogname();
+    bool is_settings = prog && (strstr(prog, "settings") != nullptr);
+
+    if (is_settings) {
+        // 설정 앱이지만 와이파이 스캔/타임아웃 쪽에서 부른 거라면 순정 시간 유지 (렉 방지)
+        if (should_bypass_settings_fake()) {
+            return;
+        }
+        // 그 외(가동시간 UI 렌더링 등)는 부팅 시간 뻥튀기 적용
         if (clk_id == CLOCK_BOOTTIME) {
             tp->tv_sec += kBootTimeOffsetSec;
         }
@@ -113,7 +153,6 @@ int my___clock_gettime(clockid_t clk_id, struct timespec *tp) {
     return ret;
 }
 
-// 부트 카운트 조작 (9 ~ 13회 랜덤 고정)
 int my___system_property_get(const char *key, char *value) {
     if (key && strcmp(key, "sys.boot_count") == 0) {
         if (value) {
@@ -127,9 +166,7 @@ int my___system_property_get(const char *key, char *value) {
     return -1;
 }
 
-// /proc/uptime 요청을 가로채서 가짜 데이터를 담은 메모리 파일 디스크립터를 반환
 static int create_fake_uptime_fd() {
-    // 실제 원본 uptime을 가져와서 오프셋을 더함
     struct timespec tp;
     if (orig_clock_gettime) {
         orig_clock_gettime(CLOCK_BOOTTIME, &tp);
@@ -144,7 +181,6 @@ static int create_fake_uptime_fd() {
     char buf[128];
     int len = snprintf(buf, sizeof(buf), "%lu.00 %lu.00\n", tp.tv_sec, tp.tv_sec);
 
-    // 메모리 기반 임시 파일 생성 (디스크 저장 없음)
     int fd = syscall(__NR_memfd_create, "uptime_fake", MFD_CLOEXEC);
     if (fd != -1) {
         write(fd, buf, len);
@@ -153,7 +189,6 @@ static int create_fake_uptime_fd() {
     return fd;
 }
 
-// open 후킹
 int my_open(const char *pathname, int flags, mode_t mode) {
     if (pathname && strstr(pathname, "proc/uptime")) {
         int fake_fd = create_fake_uptime_fd();
@@ -162,7 +197,6 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     return orig_open ? orig_open(pathname, flags, mode) : open(pathname, flags, mode);
 }
 
-// openat 후킹
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     if (pathname && strstr(pathname, "proc/uptime")) {
         int fake_fd = create_fake_uptime_fd();
