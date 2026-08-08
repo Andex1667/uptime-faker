@@ -41,25 +41,12 @@ static int (*orig_clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullpt
 static int (*orig___clock_gettime)(clockid_t clk_id, struct timespec *tp) = nullptr;
 static int (*orig___system_property_get)(const char *key, char *value) = nullptr;
 
-// 프로세스별 판별 결과를 캐싱하기 위한 변수 (-1: 미판별, 0: 예외대상, 1: 변조대상)
-// 매번 문자열 검사(strstr)를 하지 않아 CPU 부하와 와이파이/네트워크 렉을 완벽하게 없애줍니다.
-static int g_should_fake = -1;
-
-// 시스템 앱, 네트워크 데몬 및 런처 예외 처리 함수 (캐싱 적용)
+// 네트워크 및 시스템 코어 렉 유발 프로세스만 정밀 예외 처리 (설정 앱 등은 정상적으로 가동시간 표시 허용)
 static bool should_fake_time() {
-    if (g_should_fake != -1) {
-        return g_should_fake == 1;
-    }
-
     const char *prog = getprogname();
-    if (!prog) {
-        g_should_fake = 0;
-        return false;
-    }
+    if (!prog) return true;
     
-    if (strstr(prog, "systemui") ||
-        strstr(prog, "launcher") ||
-        strstr(prog, "wifi") ||
+    if (strstr(prog, "wifi") ||
         strstr(prog, "netd") ||          // 네트워크 데몬 (와이파이 속도 저하 해결)
         strstr(prog, "network_stack") || // 안드로이드 네트워크 스택
         strstr(prog, "dnsmasq") ||       // DNS 관련
@@ -72,17 +59,10 @@ static bool should_fake_time() {
         strstr(prog, "mediaserver") ||   // 미디어 처리 백그라운드
         strstr(prog, "bluetooth") ||
         strstr(prog, "nfc") ||
-        strstr(prog, "shell") ||
-        strstr(prog, "chrome") ||
-        strstr(prog, "gms") ||
-        strstr(prog, "naver") ||
         strcmp(prog, "zygote") == 0 ||
         strcmp(prog, "zygote64") == 0) {
-        g_should_fake = 0; // 예외 처리 (시간 조작 안 함)
         return false;
     }
-
-    g_should_fake = 1; // 변조 대상 (타겟 앱)
     return true;
 }
 
